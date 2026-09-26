@@ -10,17 +10,29 @@ import java.time.LocalTime
 import java.time.format.TextStyle
 import java.util.Locale
 
+data class PeriodEntry(
+    val period: Int,
+    val subject: String,
+    val online: Boolean
+)
+
+data class Reminder(
+    val hour: Int,
+    val minute: Int,
+    val daysAhead: Int
+)
+
 data class DayConfig(
-    val notifyHour: Int,
-    val notifyMinute: Int,
-    val daysAhead: Int,
-    val firstPeriodTime: LocalTime,
+    val reminders: List<Reminder>,
     val travelMinutes: Int,
     val prepMinutes: Int,
     val homeLat: Double,
     val homeLon: Double,
-    val weekSchedule: Map<DayOfWeek, List<String>>,
-    val itemsBySubject: Map<String, List<String>>
+    val exemptSubjects: Set<String>,
+    val periodTimes: Map<Int, Pair<LocalTime, LocalTime>>,
+    val weekSchedule: Map<DayOfWeek, List<PeriodEntry>>,
+    val itemsBySubject: Map<String, List<String>>,
+    val alwaysBring: List<String>
 )
 
 object ScheduleEngine {
@@ -29,13 +41,57 @@ object ScheduleEngine {
         val text = context.assets.open("config.json").bufferedReader().use { it.readText() }
         val json = JSONObject(text)
 
+        val remindersJson = json.getJSONArray("reminders")
+        val reminders = mutableListOf<Reminder>()
+        for (i in 0 until remindersJson.length()) {
+            val obj = remindersJson.getJSONObject(i)
+            reminders.add(
+                Reminder(
+                    hour = obj.getInt("hour"),
+                    minute = obj.getInt("minute"),
+                    daysAhead = obj.getInt("days_ahead")
+                )
+            )
+        }
+
+        val periodTimesJson = json.getJSONArray("period_times")
+        val periodTimes = mutableMapOf<Int, Pair<LocalTime, LocalTime>>()
+        for (i in 0 until periodTimesJson.length()) {
+            val obj = periodTimesJson.getJSONObject(i)
+            periodTimes[obj.getInt("period")] = Pair(
+                LocalTime.parse(obj.getString("start")),
+                LocalTime.parse(obj.getString("end"))
+            )
+        }
+
+        val exemptJson = json.optJSONArray("exempt_subjects")
+        val exemptSubjects = mutableSetOf<String>()
+        if (exemptJson != null) {
+            for (i in 0 until exemptJson.length()) exemptSubjects.add(exemptJson.getString(i))
+        }
+
+        val alwaysBringJson = json.optJSONArray("always_bring")
+        val alwaysBring = mutableListOf<String>()
+        if (alwaysBringJson != null) {
+            for (i in 0 until alwaysBringJson.length()) alwaysBring.add(alwaysBringJson.getString(i))
+        }
+
         val weekJson = json.getJSONObject("week_schedule")
-        val week = mutableMapOf<DayOfWeek, List<String>>()
+        val week = mutableMapOf<DayOfWeek, List<PeriodEntry>>()
         for (day in DayOfWeek.values()) {
             val arr = weekJson.optJSONArray(day.name)
-            val list = mutableListOf<String>()
+            val list = mutableListOf<PeriodEntry>()
             if (arr != null) {
-                for (i in 0 until arr.length()) list.add(arr.getString(i))
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    list.add(
+                        PeriodEntry(
+                            period = obj.getInt("period"),
+                            subject = obj.getString("subject"),
+                            online = obj.optBoolean("online", false)
+                        )
+                    )
+                }
             }
             week[day] = list
         }
@@ -54,56 +110,97 @@ object ScheduleEngine {
         }
 
         return DayConfig(
-            notifyHour = json.optInt("notify_hour", 20),
-            notifyMinute = json.optInt("notify_minute", 0),
-            daysAhead = json.optInt("days_ahead", 1),
-            firstPeriodTime = LocalTime.parse(json.optString("first_period_time", "08:30")),
+            reminders = reminders,
             travelMinutes = json.optInt("travel_minutes", 20),
             prepMinutes = json.optInt("prep_minutes", 15),
             homeLat = json.optDouble("home_lat", 0.0),
             homeLon = json.optDouble("home_lon", 0.0),
+            exemptSubjects = exemptSubjects,
+            periodTimes = periodTimes,
             weekSchedule = week,
-            itemsBySubject = items
+            itemsBySubject = items,
+            alwaysBring = alwaysBring
         )
     }
 
-    fun buildMessage(config: DayConfig): String {
-        val targetDate = LocalDate.now().plusDays(config.daysAhead.toLong())
+    fun buildMessage(config: DayConfig, daysAhead: Int): String {
+        val targetDate = LocalDate.now().plusDays(daysAhead.toLong())
         val dayOfWeek = targetDate.dayOfWeek
-        val subjects = config.weekSchedule[dayOfWeek] ?: emptyList()
         val dayName = dayOfWeek.getDisplayName(TextStyle.FULL, Locale("ru"))
             .replaceFirstChar { it.uppercase() }
 
-        if (subjects.isEmpty()) {
+        val entries = (config.weekSchedule[dayOfWeek] ?: emptyList()).sortedBy { it.period }
+
+        if (entries.isEmpty()) {
             return "$dayName, $targetDate — пар нет."
         }
 
-        val departureTime = config.firstPeriodTime
-            .minusMinutes(config.prepMinutes.toLong())
-            .minusMinutes(config.travelMinutes.toLong())
+        val entryByPeriod = entries.associateBy { it.period }
+        val minPeriod = entries.minOf { it.period }
+        val maxPeriod = entries.maxOf { it.period }
 
-        val items = subjects
-            .flatMap { config.itemsBySubject[it] ?: emptyList() }
-            .distinct()
-
-        val weather = try {
-            fetchWeather(config.homeLat, config.homeLon, targetDate, departureTime)
-        } catch (e: Exception) {
-            null
+        // Первая пара, на которую реально нужно ехать (не освобождение и не онлайн)
+        val firstInPerson = entries.firstOrNull {
+            it.subject !in config.exemptSubjects && !it.online
         }
 
         val sb = StringBuilder()
         sb.append("$dayName, $targetDate\n")
-        subjects.forEachIndexed { index, subject ->
-            sb.append("${index + 1} пара — $subject\n")
+
+        var period = minPeriod
+        while (period <= maxPeriod) {
+            val entry = entryByPeriod[period]
+            if (entry == null) {
+                var end = period
+                while (end + 1 <= maxPeriod && entryByPeriod[end + 1] == null) end++
+                sb.append(
+                    if (end == period) "$period пара — окно\n"
+                    else "$period-$end пара — окно\n"
+                )
+                period = end + 1
+                continue
+            }
+            val times = config.periodTimes[entry.period]
+            val timeLabel = if (times != null) " (${times.first}–${times.second})" else ""
+            val suffix = when {
+                entry.subject in config.exemptSubjects -> " — освобождение, не идёшь"
+                entry.online -> " — онлайн, из дома"
+                else -> ""
+            }
+            sb.append("${entry.period} пара$timeLabel — ${entry.subject}$suffix\n")
+            period++
         }
-        sb.append("время выхода: $departureTime\n")
-        if (weather != null) {
-            sb.append("погода: при выходе ${weather.first}°C, днём до ${weather.second}°C\n")
+
+        if (firstInPerson != null) {
+            val startTime = config.periodTimes[firstInPerson.period]?.first
+            if (startTime != null) {
+                val departureTime = startTime
+                    .minusMinutes(config.prepMinutes.toLong())
+                    .minusMinutes(config.travelMinutes.toLong())
+                sb.append("время выхода: $departureTime\n")
+
+                val weather = try {
+                    fetchWeather(config.homeLat, config.homeLon, targetDate, departureTime)
+                } catch (e: Exception) {
+                    null
+                }
+                if (weather != null) {
+                    sb.append("погода: при выходе ${weather.first}°C, днём до ${weather.second}°C\n")
+                }
+            }
+        } else {
+            sb.append("очных пар нет — из дома выходить не нужно\n")
         }
+
+        val items = (
+            entries
+                .filter { it.subject !in config.exemptSubjects }
+                .flatMap { config.itemsBySubject[it.subject] ?: emptyList() } + config.alwaysBring
+            ).distinct()
         if (items.isNotEmpty()) {
             sb.append("взять: ${items.joinToString(", ")}")
         }
+
         return sb.toString().trim()
     }
 

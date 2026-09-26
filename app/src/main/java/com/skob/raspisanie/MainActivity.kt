@@ -30,10 +30,11 @@ class MainActivity : AppCompatActivity() {
         val testButton = findViewById<Button>(R.id.testButton)
 
         val config = ScheduleEngine.loadConfig(this)
-        statusText.text = "Ежедневное уведомление настроено на " +
-            "${"%02d:%02d".format(config.notifyHour, config.notifyMinute)}.\n\n" +
-            "Расписание, адрес и погода берутся из config.json внутри проекта " +
-            "(assets/config.json) — правится на GitHub и пересобирается через Actions."
+        val remindersText = config.reminders.joinToString("\n") {
+            "• ${"%02d:%02d".format(it.hour, it.minute)}"
+        }
+        statusText.text = "Уведомления приходят:\n$remindersText\n\n" +
+            "Расписание, адрес и что брать — из config.json внутри проекта."
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -54,7 +55,7 @@ class MainActivity : AppCompatActivity() {
                     )
                 }
             }
-            AlarmScheduler.scheduleNext(this)
+            AlarmScheduler.scheduleAll(this)
             statusText.text = "Готово: ежедневные уведомления включены."
         }
 

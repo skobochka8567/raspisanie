@@ -10,23 +10,45 @@ import java.time.ZoneId
 
 object AlarmScheduler {
 
-    fun scheduleNext(context: Context) {
-        val config = ScheduleEngine.loadConfig(context)
-        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    const val EXTRA_REMINDER_INDEX = "reminder_index"
 
-        var next = LocalDateTime.now()
-            .withHour(config.notifyHour)
-            .withMinute(config.notifyMinute)
+    // Ставит все напоминания из конфига на ближайшее подходящее время
+    fun scheduleAll(context: Context) {
+        val config = ScheduleEngine.loadConfig(context)
+        config.reminders.forEachIndexed { index, reminder ->
+            var next = LocalDateTime.now()
+                .withHour(reminder.hour)
+                .withMinute(reminder.minute)
+                .withSecond(0)
+                .withNano(0)
+            if (next.isBefore(LocalDateTime.now())) {
+                next = next.plusDays(1)
+            }
+            scheduleAt(context, index, next)
+        }
+    }
+
+    // Переставляет одно конкретное напоминание на завтра (вызывается сразу после его срабатывания)
+    fun rescheduleTomorrow(context: Context, reminderIndex: Int) {
+        val config = ScheduleEngine.loadConfig(context)
+        val reminder = config.reminders.getOrNull(reminderIndex) ?: return
+        val next = LocalDateTime.now()
+            .withHour(reminder.hour)
+            .withMinute(reminder.minute)
             .withSecond(0)
             .withNano(0)
-        if (next.isBefore(LocalDateTime.now())) {
-            next = next.plusDays(1)
-        }
+            .plusDays(1)
+        scheduleAt(context, reminderIndex, next)
+    }
+
+    private fun scheduleAt(context: Context, reminderIndex: Int, next: LocalDateTime) {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val triggerAt = next.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
 
         val intent = Intent(context, ScheduleAlarmReceiver::class.java)
+        intent.putExtra(EXTRA_REMINDER_INDEX, reminderIndex)
         val pendingIntent = PendingIntent.getBroadcast(
-            context, 0, intent,
+            context, reminderIndex, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 

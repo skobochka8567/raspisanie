@@ -19,11 +19,11 @@ object NotificationHelper {
         manager.createNotificationChannel(channel)
     }
 
-    fun show(context: Context, text: String) {
+    fun show(context: Context, title: String, text: String) {
         ensureChannel(context)
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("Расписание")
+            .setContentTitle(title)
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
